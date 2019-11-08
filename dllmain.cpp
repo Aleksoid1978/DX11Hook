@@ -1,6 +1,27 @@
 #include <d3d11.h>
+#include <dxgi1_2.h>
 #include <stdio.h>
 #include "./minhook/minhook/include/MinHook.h"
+
+PFN_D3D11_CREATE_DEVICE_AND_SWAP_CHAIN pOrigD3D11CreateDeviceAndSwapChain = nullptr;
+HRESULT WINAPI pNewD3D11CreateDeviceAndSwapChain(
+	_In_opt_ IDXGIAdapter* pAdapter,
+	D3D_DRIVER_TYPE DriverType,
+	HMODULE Software,
+	UINT Flags,
+	_In_reads_opt_(FeatureLevels) CONST D3D_FEATURE_LEVEL* pFeatureLevels,
+	UINT FeatureLevels,
+	UINT SDKVersion,
+	_In_opt_ CONST DXGI_SWAP_CHAIN_DESC* pSwapChainDesc,
+	_COM_Outptr_opt_ IDXGISwapChain** ppSwapChain,
+	_COM_Outptr_opt_ ID3D11Device** ppDevice,
+	_Out_opt_ D3D_FEATURE_LEVEL* pFeatureLevel,
+	_COM_Outptr_opt_ ID3D11DeviceContext** ppImmediateContext)
+{
+	OutputDebugStringW(L"D3D11CreateDeviceAndSwapChain()");
+
+	return pOrigD3D11CreateDeviceAndSwapChain(pAdapter, DriverType, Software, Flags, pFeatureLevels, FeatureLevels, SDKVersion, pSwapChainDesc, ppSwapChain, ppDevice, pFeatureLevel, ppImmediateContext);
+}
 
 typedef HRESULT(__stdcall* PFNVideoProcessorBlt)(
 	ID3D11VideoContext*,
@@ -20,22 +41,63 @@ HRESULT WINAPI pNewVideoProcessorBlt(
 	_In_reads_(StreamCount) const D3D11_VIDEO_PROCESSOR_STREAM* pStreams)
 {
 #ifdef _DEBUG
-	wchar_t buf[512] = {};
+	wchar_t buf[256] = {};
 	swprintf_s(buf, _countof(buf), L"VideoProcessorBlt(): OutputFrame - %u, StreamCount - %u, InputFrameOrField - %u, OutputIndex - %u, FutureFrames - %u, PastFrames - %u\n",
-		OutputFrame, StreamCount, pStreams->InputFrameOrField, pStreams->OutputIndex, pStreams->FutureFrames, pStreams->PastFrames);
+								   OutputFrame, StreamCount, pStreams->InputFrameOrField, pStreams->OutputIndex, pStreams->FutureFrames, pStreams->PastFrames);
 	OutputDebugStringW(buf);
 #endif
 
 	return pOrigVideoProcessorBlt(This, pVideoProcessor, pView, OutputFrame, StreamCount, pStreams);
 }
 
+typedef HRESULT(__stdcall* PFNPresent)(
+	IDXGISwapChain*,
+	/* [in] */ UINT,
+	/* [in] */ UINT);
+
+PFNPresent POrigPresent = nullptr;
+HRESULT WINAPI PNewPresent(
+	IDXGISwapChain* This,
+	/* [in] */ UINT SyncInterval,
+	/* [in] */ UINT Flags)
+{
+#ifdef _DEBUG
+	wchar_t buf[64] = {};
+	swprintf_s(buf, _countof(buf), L"Present(): SyncInterval - %u, Flags - %u\n",
+								   SyncInterval, Flags);
+	OutputDebugStringW(buf);
+#endif
+
+	return POrigPresent(This, SyncInterval, Flags);
+}
+
+typedef HRESULT(__stdcall* PFNPresent1)(
+	IDXGISwapChain1*,
+	/* [in] */ UINT,
+	/* [in] */ UINT,
+	_In_ const DXGI_PRESENT_PARAMETERS*);
+
+PFNPresent1 POrigPresent1 = nullptr;
+HRESULT WINAPI PNewPresent1(
+	IDXGISwapChain1* This,
+	/* [in] */ UINT SyncInterval,
+	/* [in] */ UINT Flags,
+	_In_ const DXGI_PRESENT_PARAMETERS *pPresentParameters)
+{
+#ifdef _DEBUG
+	wchar_t buf[62] = {};
+	swprintf_s(buf, _countof(buf), L"Present1(): SyncInterval - %u, Flags - %u\n",
+								   SyncInterval, Flags);
+	OutputDebugStringW(buf);
+#endif
+
+	return POrigPresent1(This, SyncInterval, Flags, pPresentParameters);
+}
+
 template <typename T>
 inline bool HookFunc(T** ppSystemFunction, PVOID pHookFunction)
 {
-	auto bHookingSuccessful = MH_Initialize() == MH_OK;
-	bHookingSuccessful = bHookingSuccessful && MH_CreateHook(*ppSystemFunction, pHookFunction, reinterpret_cast<LPVOID*>(ppSystemFunction)) == MH_OK;
-	bHookingSuccessful = bHookingSuccessful && MH_EnableHook(MH_ALL_HOOKS) == MH_OK;
-	return bHookingSuccessful;
+	return (MH_CreateHook(*ppSystemFunction, pHookFunction, reinterpret_cast<LPVOID*>(ppSystemFunction)) == MH_OK && MH_EnableHook(MH_ALL_HOOKS) == MH_OK);
 }
 
 DWORD __stdcall SetHookThread(LPVOID)
@@ -74,6 +136,79 @@ DWORD __stdcall SetHookThread(LPVOID)
 			swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
 			if (SUCCEEDED(pD3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, featureLevels, _countof(featureLevels), D3D11_SDK_VERSION, &swapChainDesc, &pSwapChain, &pDevice, nullptr, &pContext))) {
+				pOrigD3D11CreateDeviceAndSwapChain = pD3D11CreateDeviceAndSwapChain;
+				auto ret = HookFunc(&pOrigD3D11CreateDeviceAndSwapChain, pNewD3D11CreateDeviceAndSwapChain);
+				if (ret) {
+					OutputDebugStringW(L"SetHookThread() - hook for D3D11CreateDeviceAndSwapChain() set\n");
+				} else {
+					OutputDebugStringW(L"SetHookThread() - hook for D3D11CreateDeviceAndSwapChain() fail\n");
+				}
+
+				DWORD_PTR* pSwapChainVtable = (DWORD_PTR*)pSwapChain;
+				pSwapChainVtable = (DWORD_PTR*)pSwapChainVtable[0];
+
+				POrigPresent = (PFNPresent)(pSwapChainVtable[8]);
+
+				ret = HookFunc(&POrigPresent, PNewPresent);
+				if (ret) {
+					OutputDebugStringW(L"SetHookThread() - hook for Present() set\n");
+				} else {
+					OutputDebugStringW(L"SetHookThread() - hook for Present() fail\n");
+				}
+
+				IDXGIDevice* pDXGIDevice = nullptr;
+				pDevice->QueryInterface(__uuidof(IDXGIDevice), (void**)&pDXGIDevice);
+				if (pDXGIDevice) {
+					IDXGIAdapter* pDXGIAdapter = nullptr;
+					pDXGIDevice->GetAdapter(&pDXGIAdapter);
+					if (pDXGIAdapter) {
+						IDXGIFactory1* pDXGIFactory1 = nullptr;
+						pDXGIAdapter->GetParent(__uuidof(IDXGIFactory1), (void**)&pDXGIFactory1);
+						if (pDXGIFactory1) {
+							IDXGIFactory2* pDXGIFactory2 = nullptr;
+							pDXGIFactory1->QueryInterface(__uuidof(IDXGIFactory2), (void**)&pDXGIFactory2);
+							if (pDXGIFactory2) {
+								IDXGISwapChain1* pSwapChain1 = nullptr;
+
+								DXGI_SWAP_CHAIN_DESC1 desc = {};
+								desc.Width = 320;
+								desc.Height = 200;
+								desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+								desc.SampleDesc.Count = 1;
+								desc.SampleDesc.Quality = 0;
+								desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+								desc.BufferCount = 1;
+								desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+								desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+								pDXGIFactory2->CreateSwapChainForHwnd(pDevice, hWnd, &desc, nullptr, nullptr, &pSwapChain1);
+								if (pSwapChain1) {
+									DWORD_PTR* pSwapChain1Vtable = (DWORD_PTR*)pSwapChain1;
+									pSwapChain1Vtable = (DWORD_PTR*)pSwapChain1Vtable[0];
+
+									POrigPresent1 = (PFNPresent1)(pSwapChain1Vtable[22]);
+
+									ret = HookFunc(&POrigPresent1, PNewPresent1);
+									if (ret) {
+										OutputDebugStringW(L"SetHookThread() - hook for Present1() set\n");
+									} else {
+										OutputDebugStringW(L"SetHookThread() - hook for Present1() fail\n");
+									}
+
+									pSwapChain1->Release();
+								}
+
+								pDXGIFactory2->Release();
+							}
+
+							pDXGIFactory1->Release();
+						}
+
+						pDXGIAdapter->Release();
+					}
+
+					pDXGIDevice->Release();
+				}
+
 				ID3D11VideoContext* pVideoContext = nullptr;
 				pContext->QueryInterface(__uuidof(ID3D11VideoContext), (void**)&pVideoContext);
 				if (pVideoContext) {
@@ -81,7 +216,7 @@ DWORD __stdcall SetHookThread(LPVOID)
 					pVideoContextVtable = (DWORD_PTR*)pVideoContextVtable[0];
 
 					pOrigVideoProcessorBlt = (PFNVideoProcessorBlt)(pVideoContextVtable[53]);
-					const auto ret = HookFunc(&pOrigVideoProcessorBlt, pNewVideoProcessorBlt);
+					ret = HookFunc(&pOrigVideoProcessorBlt, pNewVideoProcessorBlt);
 					if (ret) {
 						OutputDebugStringW(L"SetHookThread() - hook for VideoProcessorBlt() set\n");
 					} else {
@@ -105,6 +240,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 {
     switch (ul_reason_for_call) {
 		case DLL_PROCESS_ATTACH:
+			MH_Initialize();
 			CreateThread(nullptr, 0, SetHookThread, nullptr, 0, nullptr);
 			break;
 		case DLL_PROCESS_DETACH:
