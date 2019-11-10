@@ -23,6 +23,30 @@ HRESULT WINAPI pNewD3D11CreateDeviceAndSwapChain(
 	return pOrigD3D11CreateDeviceAndSwapChain(pAdapter, DriverType, Software, Flags, pFeatureLevels, FeatureLevels, SDKVersion, pSwapChainDesc, ppSwapChain, ppDevice, pFeatureLevel, ppImmediateContext);
 }
 
+typedef HRESULT(__stdcall* PFNCreateSwapChainForHwnd)(
+	IDXGIFactory2*,
+	_In_ IUnknown*,
+	_In_ HWND,
+	_In_ const DXGI_SWAP_CHAIN_DESC1*,
+	_In_opt_ const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*,
+	_In_opt_ IDXGIOutput*,
+	_COM_Outptr_ IDXGISwapChain1**);
+
+PFNCreateSwapChainForHwnd pOrigCreateSwapChainForHwnd = nullptr;
+HRESULT WINAPI pNewCreateSwapChainForHwnd(
+	IDXGIFactory2* This,
+	_In_ IUnknown* pDevice,
+	_In_ HWND hWnd,
+	_In_ const DXGI_SWAP_CHAIN_DESC1* pDesc,
+	_In_opt_ const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc,
+	_In_opt_ IDXGIOutput* pRestrictToOutput,
+	_COM_Outptr_ IDXGISwapChain1** ppSwapChain)
+{
+	OutputDebugStringW(L"CreateSwapChainForHwnd()");
+
+	return pOrigCreateSwapChainForHwnd(This, pDevice, hWnd, pDesc, pFullscreenDesc, pRestrictToOutput, ppSwapChain);
+}
+
 typedef HRESULT(__stdcall* PFNVideoProcessorBlt)(
 	ID3D11VideoContext*,
 	_In_ ID3D11VideoProcessor*,
@@ -85,7 +109,7 @@ HRESULT WINAPI PNewPresent1(
 	_In_ const DXGI_PRESENT_PARAMETERS *pPresentParameters)
 {
 #ifdef _DEBUG
-	wchar_t buf[62] = {};
+	wchar_t buf[64] = {};
 	swprintf_s(buf, _countof(buf), L"Present1(): SyncInterval - %u, Flags - %u\n",
 								   SyncInterval, Flags);
 	OutputDebugStringW(buf);
@@ -195,6 +219,18 @@ DWORD __stdcall SetHookThread(LPVOID)
 									}
 
 									pSwapChain1->Release();
+								}
+
+								DWORD_PTR* pDXGIFactory2Vtable = (DWORD_PTR*)pDXGIFactory2;
+								pDXGIFactory2Vtable = (DWORD_PTR*)pDXGIFactory2Vtable[0];
+
+								pOrigCreateSwapChainForHwnd = (PFNCreateSwapChainForHwnd)(pDXGIFactory2Vtable[15]);
+
+								ret = HookFunc(&pOrigCreateSwapChainForHwnd, pNewCreateSwapChainForHwnd);
+								if (ret) {
+									OutputDebugStringW(L"SetHookThread() - hook for CreateSwapChainForHwnd() set\n");
+								} else {
+									OutputDebugStringW(L"SetHookThread() - hook for CreateSwapChainForHwnd() fail\n");
 								}
 
 								pDXGIFactory2->Release();
